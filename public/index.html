@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Czółko online</title>
+  <title>Zakoleee – Czółko online</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Lilita+One&family=Nunito:wght@600;700;800;900&display=swap" rel="stylesheet">
@@ -12,7 +12,7 @@
 <body>
   <!-- Ekran startowy -->
   <section id="home" class="screen">
-    <div class="logo logo-big"><span>Czółko</span></div>
+    <img class="logo-img logo-big" src="logo.webp" alt="Zakoleee">
     <p class="tagline">Każdy ma hasło, którego sam nie widzi. Pytaj na tak/nie i zgadnij, kim jesteś!</p>
 
     <div class="card home-card">
@@ -41,7 +41,7 @@
       <div class="topbar-left">
         <div id="roundPill" class="pill">lobby</div>
       </div>
-      <div class="logo logo-small"><span>Czółko</span></div>
+      <img class="logo-img logo-small" src="logo.webp" alt="Zakoleee">
       <div class="topbar-right">
         <div class="pill code-pill">Kod: <b id="roomCode"></b></div>
         <button id="copyLink" class="icon-btn" title="Kopiuj link zaproszenia">🔗</button>
@@ -58,7 +58,8 @@
       </div>
       <div id="timer" class="timer hidden"></div>
       <div class="status-btns">
-        <button id="nextBtn" class="btn primary hidden">Następny ➜</button>
+        <button id="nextBtn" class="btn primary hidden">✅ Zakończ pytanie</button>
+        <button id="skipBtn" class="btn secondary hidden" title="Gdy pytający nie odpowiada lub odszedł od komputera">Pomiń gracza</button>
         <button id="endBtn" class="btn danger hidden">Zakończ</button>
       </div>
     </div>
@@ -133,7 +134,14 @@
 
   <div id="toast" class="toast hidden"></div>
 
+  <!-- Muzyka w tle -->
+  <div class="music-box">
+    <button id="musicBtn" class="music-btn" title="Włącz / wyłącz muzykę">🎵</button>
+    <input id="musicVolume" type="range" min="0" max="100" value="30" aria-label="Głośność muzyki">
+  </div>
+
   <script src="/socket.io/socket.io.js"></script>
+  <script src="music.js"></script>
   <script src="client.js"></script>
 </body>
 </html>

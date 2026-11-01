@@ -434,12 +434,14 @@ function renderPlay() {
   const me = state.players.find((p) => p.id === myId);
   $('turnTitle').textContent = myTurn ? '🎤 Twoja kolej!' : `Pyta: ${nameOf(state.turnId)}`;
   $('turnHint').textContent = myTurn
-    ? 'Zadawaj pytania na tak/nie. Gdy zgadniesz, ktoś kliknie „Zgadł!” pod Twoją kamerką.'
+    ? (state.timeUp
+      ? '⏰ Czas minął! Kliknij „Zakończ pytanie”, żeby oddać kolejkę.'
+      : 'Zadaj pytanie na tak/nie. Gdy skończysz, kliknij „Zakończ pytanie” – dopiero wtedy pyta następna osoba.')
     : me?.guessed
       ? 'Zgadłeś(-aś) swoje hasło! Pomagaj odpowiadać pozostałym.'
-      : 'Odpowiadaj na głos: tak / nie. Gdy gracz zgadnie, kliknij „Zgadł!” pod jego kamerką.';
-  $('nextBtn').classList.toggle('hidden', !(myTurn || isHost()));
-  $('nextBtn').textContent = myTurn ? 'Pasuję ➜' : 'Następny ➜';
+      : `Odpowiadaj na głos: tak / nie. Gdy ${nameOf(state.turnId)} zgadnie, kliknij „Zgadł!” pod kamerką. Kolejka przejdzie dalej, gdy pytający zakończy pytanie.`;
+  $('nextBtn').classList.toggle('hidden', !myTurn);
+  $('skipBtn').classList.toggle('hidden', myTurn || !isHost());
   $('endBtn').classList.toggle('hidden', !isHost());
   renderTimer();
 }
@@ -451,7 +453,7 @@ function renderTimer() {
   el.classList.remove('hidden');
   const tick = () => {
     const left = Math.max(0, Math.ceil((state.turnEndsAt - (Date.now() + clockOffset)) / 1000));
-    el.textContent = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
+    el.textContent = left || !state.timeUp ? `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}` : 'Czas!';
     el.classList.toggle('low', left <= 10);
   };
   tick();
@@ -493,6 +495,9 @@ socket.on('guessed', ({ playerId, word }) => {
 });
 
 $('nextBtn').onclick = () => socket.emit('next-turn');
+$('skipBtn').onclick = () => {
+  if (confirm(`Pominąć turę gracza ${nameOf(state.turnId)}?`)) socket.emit('next-turn');
+};
 $('endBtn').onclick = () => { if (confirm('Zakończyć grę dla wszystkich?')) socket.emit('end-game'); };
 $('againBtn').onclick = () => socket.emit('start-game', () => {});
 $('lobbyBtn').onclick = () => socket.emit('back-to-lobby');
@@ -512,6 +517,40 @@ function toast(msg, sticky = false) {
   clearTimeout(toastTimeout);
   if (!sticky) toastTimeout = setTimeout(() => el.classList.add('hidden'), 3500);
 }
+
+// ---------- muzyka ----------
+
+function musicPref(key, fallback) {
+  try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; }
+}
+function setMusicPref(key, value) {
+  try { localStorage.setItem(key, value); } catch {}
+}
+
+let musicOn = musicPref('czolko-music', '1') === '1';
+$('musicVolume').value = musicPref('czolko-volume', '30');
+Music.setVolume($('musicVolume').value / 100);
+$('musicBtn').classList.toggle('off', !musicOn);
+
+$('musicBtn').onclick = (e) => {
+  e.stopPropagation();
+  musicOn = !musicOn;
+  setMusicPref('czolko-music', musicOn ? '1' : '0');
+  $('musicBtn').classList.toggle('off', !musicOn);
+  musicOn ? Music.play() : Music.pause();
+};
+$('musicVolume').oninput = () => {
+  Music.setVolume($('musicVolume').value / 100);
+  setMusicPref('czolko-volume', $('musicVolume').value);
+  if (!musicOn) $('musicBtn').click();
+};
+// przeglądarki pozwalają włączyć dźwięk dopiero po pierwszym kliknięciu na stronie
+function startMusicOnce(e) {
+  if (e.target.closest('.music-box')) return; // przyciskiem muzyki steruje sam użytkownik
+  document.removeEventListener('pointerdown', startMusicOnce);
+  if (musicOn && !Music.playing) Music.play();
+}
+document.addEventListener('pointerdown', startMusicOnce);
 
 // start: przyciski działają dopiero, gdy kamera i serwery ICE są gotowe
 $('nameInput').value = savedName();

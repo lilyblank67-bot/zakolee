@@ -96,6 +96,7 @@ function createRoom(hostId) {
     turnIndex: 0,
     turnNumber: 0,
     turnEndsAt: null,
+    timeUp: false,
     timer: null,
     usedWords: new Set(),
     customPool: [],
@@ -160,6 +161,7 @@ function clearTimer(room) {
   if (room.timer) clearTimeout(room.timer);
   room.timer = null;
   room.turnEndsAt = null;
+  room.timeUp = false;
 }
 
 function beginTurn(room) {
@@ -170,8 +172,9 @@ function beginTurn(room) {
   room.turnNumber++;
   if (room.settings.turnTime > 0) {
     room.turnEndsAt = Date.now() + room.settings.turnTime * 1000;
+    // po czasie tura się nie kończy sama – pytający musi kliknąć „Zakończ pytanie”
     room.timer = setTimeout(() => {
-      advanceTurn(room);
+      room.timeUp = true;
       broadcast(room);
     }, room.settings.turnTime * 1000);
   }
@@ -231,6 +234,7 @@ function viewFor(room, viewerId) {
     turnId: currentTurnId(room),
     turnNumber: room.turnNumber,
     turnEndsAt: room.turnEndsAt,
+    timeUp: room.timeUp,
     serverNow: Date.now(),
     order: room.order,
     players: [...room.players.values()].map((p) => ({
@@ -362,7 +366,7 @@ io.on('connection', (socket) => {
 
     io.to(room.code).emit('guessed', { playerId: p.id, word: p.history.at(-1), by: socket.id });
     if (!activePlayers(room).length) endGame(room);
-    else if (wasTurn) advanceTurn(room);
+    else if (wasTurn && p.guessed) advanceTurn(room); // w trybie „nowe hasło” pytający sam kończy turę
     broadcast(room);
   });
 
