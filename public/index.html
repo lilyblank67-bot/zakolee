@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Czółko online</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Ekran startowy -->
+  <section id="home" class="screen">
+    <div class="card home-card">
+      <h1>🤔 Czółko</h1>
+      <p class="muted">Każdy ma hasło, którego sam nie widzi. Zadawaj pytania na tak/nie i zgadnij, kim jesteś!</p>
+
+      <video id="preview" autoplay playsinline muted></video>
+      <p id="camStatus" class="muted small">Łączenie z kamerą…</p>
+
+      <label>Twoje imię
+        <input id="nameInput" maxlength="20" placeholder="np. Ania" autocomplete="off">
+      </label>
+
+      <button id="createBtn" class="primary" disabled>Utwórz pokój</button>
+      <div class="join-row">
+        <input id="codeInput" maxlength="5" placeholder="KOD" autocomplete="off">
+        <button id="joinBtn" disabled>Dołącz</button>
+      </div>
+      <p id="homeError" class="error"></p>
+    </div>
+  </section>
+
+  <!-- Pokój -->
+  <section id="room" class="screen hidden">
+    <header class="topbar">
+      <div class="brand">🤔 Czółko</div>
+      <div class="room-code">Pokój: <b id="roomCode"></b> <button id="copyLink" class="small-btn" title="Kopiuj link zaproszenia">🔗 Kopiuj link</button></div>
+      <div class="media-btns">
+        <button id="micBtn" class="small-btn">🎤 Mikrofon</button>
+        <button id="camBtn" class="small-btn">📷 Kamera</button>
+      </div>
+    </header>
+
+    <main class="room-layout">
+      <div id="grid" class="grid"></div>
+
+      <aside id="panel" class="card panel">
+        <!-- Lobby -->
+        <div id="lobbyPanel" class="hidden">
+          <h2>Lobby</h2>
+          <p class="muted small">Wyślij znajomym kod pokoju lub link. Host ustawia grę.</p>
+
+          <div id="hostSettings">
+            <h3>Tryb haseł</h3>
+            <label class="radio"><input type="radio" name="mode" value="categories"> Losowe z kategorii</label>
+            <label class="radio"><input type="radio" name="mode" value="custom"> Własne hasła (każdy wpisuje 10)</label>
+
+            <div id="categoryBox">
+              <h3>Kategorie</h3>
+              <div id="categoryList" class="checks"></div>
+            </div>
+
+            <h3>Po zgadnięciu</h3>
+            <label class="radio"><input type="radio" name="afterGuess" value="finish"> Gracz kończy grę (ranking wg kolejności)</label>
+            <label class="radio"><input type="radio" name="afterGuess" value="newWord"> Gracz dostaje nowe hasło (ranking wg punktów)</label>
+
+            <h3>Czas tury</h3>
+            <select id="turnTime">
+              <option value="0">Bez limitu</option>
+              <option value="60">60 s</option>
+              <option value="90">90 s</option>
+              <option value="120">120 s</option>
+            </select>
+
+            <button id="startBtn" class="primary">Start gry</button>
+            <p id="lobbyError" class="error"></p>
+          </div>
+          <div id="guestSettings" class="settings-summary"></div>
+        </div>
+
+        <!-- Wpisywanie własnych haseł -->
+        <div id="collectPanel" class="hidden">
+          <h2>Wpisz swoje hasła</h2>
+          <p class="muted small">Twoje hasła dostaną inni gracze – Ty nigdy nie wylosujesz swojego.</p>
+          <form id="wordsForm">
+            <div id="wordInputs" class="word-inputs"></div>
+            <button type="submit" class="primary">Gotowe</button>
+            <p id="collectError" class="error"></p>
+          </form>
+          <p id="collectDone" class="ok hidden">✅ Wysłane! Czekamy na pozostałych…</p>
+          <div id="collectStatus" class="status-list"></div>
+        </div>
+
+        <!-- Gra -->
+        <div id="playPanel" class="hidden">
+          <h2 id="turnTitle"></h2>
+          <p id="turnHint" class="muted small"></p>
+          <div id="timer" class="timer hidden"></div>
+          <button id="nextBtn" class="primary hidden">Następny gracz ➜</button>
+          <h3>Wyniki</h3>
+          <div id="scoreList" class="status-list"></div>
+          <button id="endBtn" class="danger hidden">Zakończ grę</button>
+        </div>
+
+        <!-- Koniec -->
+        <div id="endPanel" class="hidden">
+          <h2>🏆 Koniec gry</h2>
+          <ol id="ranking" class="ranking"></ol>
+          <div id="endHostBtns">
+            <button id="againBtn" class="primary">Zagraj ponownie</button>
+            <button id="lobbyBtn">Wróć do lobby</button>
+          </div>
+          <p id="endGuestInfo" class="muted small">Host może rozpocząć kolejną rundę.</p>
+        </div>
+      </aside>
+    </main>
+  </section>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="client.js"></script>
+</body>
+</html>
