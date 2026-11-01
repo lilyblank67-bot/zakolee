@@ -1,4 +1,5 @@
 const path = require('path');
+const crypto = require('crypto');
 const http = require('http');
 const express = require('express');
 const { Server } = require('socket.io');
@@ -7,6 +8,9 @@ const CATEGORIES = require('./words');
 const PORT = process.env.PORT || 3000;
 const WORDS_PER_PLAYER = 10;
 const MAX_PLAYERS = 8;
+// ile czasu gracz ma na powrót po rozłączeniu (crash, odświeżenie, zerwany internet)
+const LOBBY_GRACE_MS = 60 * 1000;
+const GAME_GRACE_MS = 5 * 60 * 1000;
 
 const app = express();
 app.use(express.static(path.join(__dirname, 'public')));
@@ -104,9 +108,13 @@ function createRoom(hostId) {
   };
 }
 
-function newPlayer(id, name) {
+function newPlayer(name) {
   return {
-    id,
+    id: crypto.randomBytes(6).toString('hex'), // publiczny identyfikator (widzą go inni)
+    secret: crypto.randomBytes(16).toString('hex'), // tajny klucz do powrotu do gry
+    socketId: null,
+    connected: true,
+    leaveTimer: null,
     name,
     word: null,
     guessed: false,
@@ -185,12 +193,15 @@ function advanceTurn(room) {
   if (room.phase !== 'playing') return;
   if (!activePlayers(room).length) return endGame(room);
   const n = room.order.length;
-  for (let step = 1; step <= n; step++) {
-    const idx = (room.turnIndex + step) % n;
-    const p = room.players.get(room.order[idx]);
-    if (p && !p.guessed) {
-      room.turnIndex = idx;
-      return beginTurn(room);
+  // najpierw szukamy kogoś połączonego, rozłączonych pomijamy (chyba że nikogo innego nie ma)
+  for (const needConnected of [true, false]) {
+    for (let step = 1; step <= n; step++) {
+      const idx = (room.turnIndex + step) % n;
+      const p = room.players.get(room.order[idx]);
+      if (p && !p.guessed && (p.connected || !needConnected)) {
+        room.turnIndex = idx;
+        return beginTurn(room);
+      }
     }
   }
   endGame(room);
@@ -240,6 +251,7 @@ function viewFor(room, viewerId) {
     players: [...room.players.values()].map((p) => ({
       id: p.id,
       name: p.name,
+      connected: p.connected,
       word: p.id === viewerId && !reveal && !p.guessed ? null : p.word,
       guessed: p.guessed,
       finishPlace: p.finishPlace,
@@ -252,25 +264,72 @@ function viewFor(room, viewerId) {
 }
 
 function broadcast(room) {
-  for (const id of room.players.keys()) {
-    io.to(id).emit('state', viewFor(room, id));
+  for (const p of room.players.values()) {
+    if (p.connected) io.to(p.socketId).emit('state', viewFor(room, p.id));
   }
 }
 
 // ---------- socket.io ----------
 
+function removePlayer(r, id) {
+  const p = r.players.get(id);
+  if (!p) return;
+  clearTimeout(p.leaveTimer);
+  const wasTurn = currentTurnId(r) === id;
+  r.players.delete(id);
+  io.to(r.code).emit('peer-left', { id });
+
+  if (!r.players.size) {
+    clearTimer(r);
+    rooms.delete(r.code);
+    return;
+  }
+  if (r.hostId === id) r.hostId = pickHost(r);
+
+  if (r.phase === 'playing') {
+    const idx = r.order.indexOf(id);
+    if (idx !== -1) r.order.splice(idx, 1);
+    if (idx !== -1 && idx < r.turnIndex) r.turnIndex--;
+    if (r.players.size < 2 || !activePlayers(r).length) {
+      endGame(r);
+    } else if (wasTurn) {
+      // turnIndex wskazuje już na następnego gracza – cofamy o jeden i przechodzimy dalej
+      r.turnIndex = (r.turnIndex - 1 + r.order.length) % r.order.length;
+      advanceTurn(r);
+    }
+  } else if (r.phase === 'collect') {
+    r.customPool = r.customPool.filter((e) => e.owner !== id);
+    if (r.players.size < 2) r.phase = 'lobby';
+    else maybeStartCustom(r);
+  } else if (r.phase === 'ended') {
+    r.order = r.order.filter((x) => x !== id);
+  }
+  broadcast(r);
+}
+
+/** Nowy host: najlepiej ktoś, kto jest połączony. */
+function pickHost(r) {
+  const all = [...r.players.values()];
+  return (all.find((p) => p.connected) || all[0]).id;
+}
+
 io.on('connection', (socket) => {
   let room = null;
+  let me = null;
 
-  const isHost = () => room && room.hostId === socket.id;
+  const isHost = () => room && me && room.hostId === me.id;
 
-  function join(targetRoom, name, cb) {
+  function attach(targetRoom, player, cb) {
     room = targetRoom;
-    const existing = [...room.players.keys()];
-    room.players.set(socket.id, newPlayer(socket.id, name));
+    me = player;
+    clearTimeout(me.leaveTimer);
+    me.leaveTimer = null;
+    me.socketId = socket.id;
+    me.connected = true;
     socket.join(room.code);
-    cb({ ok: true, code: room.code, id: socket.id, peers: existing });
-    socket.to(room.code).emit('peer-joined', { id: socket.id });
+    const peers = [...room.players.values()].filter((p) => p.id !== me.id && p.connected).map((p) => p.id);
+    cb({ ok: true, code: room.code, id: me.id, token: me.secret, name: me.name, peers });
+    socket.to(room.code).emit('peer-joined', { id: me.id });
     broadcast(room);
   }
 
@@ -278,9 +337,11 @@ io.on('connection', (socket) => {
     name = cleanText(name, 20);
     if (!name) return cb({ ok: false, error: 'Podaj imię.' });
     if (room) return cb({ ok: false, error: 'Już jesteś w pokoju.' });
-    const r = createRoom(socket.id);
+    const p = newPlayer(name);
+    const r = createRoom(p.id);
     rooms.set(r.code, r);
-    join(r, name, cb);
+    r.players.set(p.id, p);
+    attach(r, p, cb);
   });
 
   socket.on('join-room', ({ name, code } = {}, cb = () => {}) => {
@@ -292,7 +353,35 @@ io.on('connection', (socket) => {
     if (!r) return cb({ ok: false, error: 'Nie ma pokoju o takim kodzie.' });
     if (r.players.size >= MAX_PLAYERS) return cb({ ok: false, error: `Pokój jest pełny (max ${MAX_PLAYERS}).` });
     if (r.phase !== 'lobby') return cb({ ok: false, error: 'Gra już trwa – poczekaj na koniec rundy.' });
-    join(r, name, cb);
+    const p = newPlayer(name);
+    r.players.set(p.id, p);
+    attach(r, p, cb);
+  });
+
+  // powrót do gry po odświeżeniu strony, crashu albo zerwaniu internetu
+  socket.on('resume', ({ code, token } = {}, cb = () => {}) => {
+    if (room) return cb({ ok: false, error: 'Już jesteś w pokoju.' });
+    const r = rooms.get(cleanText(code, 5).toUpperCase());
+    if (!r) return cb({ ok: false, error: 'Ten pokój już nie istnieje.' });
+    const p = [...r.players.values()].find((x) => x.secret === token);
+    if (!p) return cb({ ok: false, error: 'Nie ma Cię już w tym pokoju.' });
+    if (p.connected) {
+      // stare połączenie jeszcze wisi (np. po crashu) – przejmujemy je
+      const old = io.sockets.sockets.get(p.socketId);
+      p.socketId = socket.id; // dzięki temu zamknięcie starego połączenia nie usunie gracza
+      if (old) old.disconnect(true);
+    }
+    attach(r, p, cb);
+  });
+
+  socket.on('leave-room', () => {
+    if (!room) return;
+    const r = room;
+    const id = me.id;
+    room = null;
+    me = null;
+    socket.leave(r.code);
+    removePlayer(r, id);
   });
 
   socket.on('update-settings', (s = {}) => {
@@ -325,13 +414,12 @@ io.on('connection', (socket) => {
 
   socket.on('submit-words', (words, cb = () => {}) => {
     if (!room || room.phase !== 'collect') return;
-    const p = room.players.get(socket.id);
     if (!Array.isArray(words)) return cb({ ok: false, error: 'Błędne dane.' });
     const clean = [...new Set(words.map((w) => cleanText(w, 40)).filter(Boolean))];
     if (clean.length < WORDS_PER_PLAYER) {
       return cb({ ok: false, error: `Wpisz ${WORDS_PER_PLAYER} różnych haseł.` });
     }
-    p.submitted = clean.slice(0, WORDS_PER_PLAYER);
+    me.submitted = clean.slice(0, WORDS_PER_PLAYER);
     cb({ ok: true });
     maybeStartCustom(room);
     broadcast(room);
@@ -339,14 +427,14 @@ io.on('connection', (socket) => {
 
   socket.on('next-turn', () => {
     if (!room || room.phase !== 'playing') return;
-    if (socket.id !== currentTurnId(room) && !isHost()) return;
+    if (me.id !== currentTurnId(room) && !isHost()) return;
     advanceTurn(room);
     broadcast(room);
   });
 
   socket.on('mark-guessed', ({ playerId } = {}) => {
     if (!room || room.phase !== 'playing') return;
-    if (playerId === socket.id) return; // nie można zatwierdzić samemu sobie
+    if (playerId === me.id) return; // nie można zatwierdzić samemu sobie
     const p = room.players.get(playerId);
     if (!p || p.guessed) return;
     p.score++;
@@ -364,7 +452,7 @@ io.on('connection', (socket) => {
       finishPlayer(room, p);
     }
 
-    io.to(room.code).emit('guessed', { playerId: p.id, word: p.history.at(-1), by: socket.id });
+    io.to(room.code).emit('guessed', { playerId: p.id, word: p.history.at(-1), by: me.id });
     if (!activePlayers(room).length) endGame(room);
     else if (wasTurn && p.guessed) advanceTurn(room); // w trybie „nowe hasło” pytający sam kończy turę
     broadcast(room);
@@ -390,41 +478,24 @@ io.on('connection', (socket) => {
 
   // sygnalizacja WebRTC – serwer tylko przekazuje wiadomości
   socket.on('signal', ({ to, data } = {}) => {
-    if (!room || !room.players.has(to)) return;
-    io.to(to).emit('signal', { from: socket.id, data });
+    const target = room && room.players.get(to);
+    if (!target || !target.connected) return;
+    io.to(target.socketId).emit('signal', { from: me.id, data });
   });
 
   socket.on('disconnect', () => {
-    if (!room) return;
+    if (!room || me.socketId !== socket.id) return; // to połączenie zostało już przejęte
     const r = room;
-    const wasTurn = currentTurnId(r) === socket.id;
-    r.players.delete(socket.id);
-    socket.to(r.code).emit('peer-left', { id: socket.id });
-
-    if (!r.players.size) {
-      clearTimer(r);
-      rooms.delete(r.code);
-      return;
-    }
-    if (r.hostId === socket.id) r.hostId = r.players.keys().next().value;
-
-    if (r.phase === 'playing') {
-      const idx = r.order.indexOf(socket.id);
-      r.order.splice(idx, 1);
-      if (idx < r.turnIndex) r.turnIndex--;
-      if (r.players.size < 2 || !activePlayers(r).length) {
-        endGame(r);
-      } else if (wasTurn) {
-        // turnIndex wskazuje już na następnego gracza – cofamy o jeden i przechodzimy dalej
-        r.turnIndex = (r.turnIndex - 1 + r.order.length) % r.order.length;
-        advanceTurn(r);
-      }
-    } else if (r.phase === 'collect') {
-      r.customPool = r.customPool.filter((e) => e.owner !== socket.id);
-      if (r.players.size < 2) r.phase = 'lobby';
-      else maybeStartCustom(r);
-    } else if (r.phase === 'ended') {
-      r.order = r.order.filter((id) => id !== socket.id);
+    const p = me;
+    p.connected = false;
+    socket.to(r.code).emit('peer-left', { id: p.id });
+    if (r.hostId === p.id) r.hostId = pickHost(r);
+    // gracz ma chwilę na powrót, zanim usuniemy go z gry
+    const grace = r.phase === 'lobby' ? LOBBY_GRACE_MS : GAME_GRACE_MS;
+    p.leaveTimer = setTimeout(() => removePlayer(r, p.id), grace);
+    if (r.phase === 'playing' && currentTurnId(r) === p.id) {
+      // nie blokujemy gry – kolejka idzie dalej, gracz wróci w swojej następnej turze
+      advanceTurn(r);
     }
     broadcast(r);
   });

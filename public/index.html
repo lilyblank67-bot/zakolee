@@ -25,6 +25,7 @@
         <input id="nameInput" maxlength="20" placeholder="np. Ania" autocomplete="off">
       </label>
 
+      <button id="rejoinBtn" class="btn primary hidden">↩ Wróć do gry</button>
       <button id="createBtn" class="btn primary" disabled>Utwórz pokój</button>
       <div class="divider"><span>albo dołącz</span></div>
       <div class="join-row">
@@ -47,6 +48,7 @@
         <button id="copyLink" class="icon-btn" title="Kopiuj link zaproszenia">🔗</button>
         <button id="micBtn" class="icon-btn" title="Mikrofon">🎤</button>
         <button id="camBtn" class="icon-btn" title="Kamera">📷</button>
+        <button id="leaveBtn" class="icon-btn" title="Wyjdź z pokoju">🚪</button>
       </div>
     </header>
 
@@ -58,14 +60,37 @@
       </div>
       <div id="timer" class="timer hidden"></div>
       <div class="status-btns">
-        <button id="nextBtn" class="btn primary hidden">✅ Zakończ pytanie</button>
         <button id="skipBtn" class="btn secondary hidden" title="Gdy pytający nie odpowiada lub odszedł od komputera">Pomiń gracza</button>
         <button id="endBtn" class="btn danger hidden">Zakończ</button>
       </div>
     </div>
 
     <main class="room-layout">
+      <!-- Notatki tylko dla siebie -->
+      <aside id="notes" class="card notes">
+        <div class="notes-head">
+          <h2>📝 Notatki</h2>
+          <button id="notesClear" class="link-btn">Wyczyść</button>
+        </div>
+        <p class="muted small">Widzisz je tylko Ty. Zapisuj, czego się już dowiedziałeś.</p>
+        <textarea id="notesText" placeholder="np.&#10;✔ jest człowiekiem&#10;✘ nie jest sportowcem&#10;✔ żyje"></textarea>
+      </aside>
+
       <div id="grid" class="grid"></div>
+
+      <div class="side">
+      <!-- Duży przycisk końca kolejki -->
+      <div id="turnBox" class="turn-box hidden">
+        <button id="bigNextBtn" class="big-next hidden">
+          <span class="big-next-icon">✅</span>
+          <span class="big-next-text">Zakończ<br>pytanie</span>
+          <span class="big-next-sub">oddaj kolejkę</span>
+        </button>
+        <div id="waitBox" class="wait-box hidden">
+          <div class="wait-icon">⏳</div>
+          <div id="waitText"></div>
+        </div>
+      </div>
 
       <aside id="panel" class="card panel">
         <!-- Lobby -->
@@ -129,6 +154,7 @@
           <p id="endGuestInfo" class="muted small">Host może rozpocząć kolejną rundę.</p>
         </div>
       </aside>
+      </div>
     </main>
   </section>
 

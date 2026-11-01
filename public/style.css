@@ -234,10 +234,121 @@ input:focus, select:focus { border-color: var(--bg-1); }
   align-items: flex-start;
   justify-content: center;
 }
-.panel { width: 340px; flex-shrink: 0; position: sticky; top: 16px; }
+.side { flex-shrink: 0; position: sticky; top: 16px; display: flex; flex-direction: column; gap: 16px; }
+.panel { width: 340px; }
+
+/* ---------- notatki ---------- */
+.notes {
+  width: 260px;
+  flex-shrink: 0;
+  position: sticky;
+  top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 18px;
+  max-height: calc(100vh - 110px); /* miejsce na przycisk muzyki na dole */
+}
+.notes-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.notes-head h2 { margin: 0; font-size: 1.35rem; }
+.notes p { margin: 0 0 4px; }
+.link-btn {
+  border: none;
+  background: none;
+  color: var(--ink-soft);
+  font-weight: 800;
+  font-size: .85rem;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 8px;
+}
+.link-btn:hover { background: #f0f3ff; color: var(--red-dark); }
+#notesText {
+  flex: 1;
+  min-height: 260px;
+  resize: none;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 2px solid var(--line);
+  background:
+    repeating-linear-gradient(#fffdf2 0 27px, #f1e7c2 27px 28px);
+  color: var(--ink);
+  font: 700 1rem/28px 'Nunito', sans-serif;
+  outline: none;
+}
+#notesText:focus { border-color: var(--yellow-dark); }
+
+/* ---------- duży przycisk końca kolejki ---------- */
+.turn-box { width: 240px; }
+.big-next {
+  width: 100%;
+  aspect-ratio: 1 / 1.05;
+  border: 5px solid #fff;
+  border-radius: 32px;
+  background: linear-gradient(180deg, #6ef59a 0%, var(--green) 55%, #22b558 100%);
+  color: #053317;
+  box-shadow: 0 10px 0 #178a42, 0 18px 40px rgba(0, 0, 0, .35);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: transform .08s, box-shadow .08s, filter .15s;
+  animation: pulse 1.8s ease-in-out infinite;
+}
+.big-next:hover { filter: brightness(1.05); }
+.big-next:active { transform: translateY(8px); box-shadow: 0 2px 0 #178a42, 0 8px 20px rgba(0, 0, 0, .3); }
+.big-next-icon { font-size: 3.4rem; line-height: 1; }
+.big-next-text {
+  font-family: 'Lilita One', sans-serif;
+  font-size: 2.1rem;
+  line-height: 1;
+  text-transform: uppercase;
+  text-align: center;
+}
+.big-next-sub { font-size: .9rem; font-weight: 900; opacity: .75; }
+@keyframes pulse {
+  50% { box-shadow: 0 10px 0 #178a42, 0 0 0 10px rgba(75, 227, 122, .25), 0 18px 40px rgba(0, 0, 0, .35); }
+}
+.wait-box {
+  background: var(--glass);
+  border: 3px dashed rgba(255, 255, 255, .35);
+  border-radius: 28px;
+  padding: 28px 18px;
+  text-align: center;
+  font-weight: 800;
+}
+.wait-icon { font-size: 2.4rem; margin-bottom: 6px; }
+
+@media (max-width: 1100px) {
+  .room-layout { flex-wrap: wrap; }
+  .grid { order: 1; flex-basis: 100%; }
+  .side { order: 2; }
+  .notes { order: 3; }
+}
 @media (max-width: 900px) {
   .room-layout { flex-direction: column; align-items: stretch; }
-  .panel { width: 100%; position: static; }
+  .side, .notes { position: static; }
+  .panel, .turn-box, .notes { width: 100%; }
+  .notes { max-height: none; }
+  .big-next { aspect-ratio: auto; padding: 20px; flex-direction: row; gap: 14px; }
+  .big-next-text br { display: none; }
+  .big-next-sub { display: none; }
+}
+
+.tile.offline .frame video, .tile.offline .no-video { filter: grayscale(1) brightness(.6); }
+.offline-tag {
+  position: absolute;
+  left: 50%; bottom: 14px;
+  transform: translateX(-50%);
+  background: var(--red);
+  color: #fff;
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: .8rem;
+  font-weight: 900;
+  white-space: nowrap;
 }
 
 /* ---------- kafelki graczy ---------- */

@@ -121,11 +121,15 @@ socket.on('signal', ({ from, data }) => {
     .catch((err) => console.warn('Błąd sygnalizacji', err));
 });
 
-socket.on('peer-left', ({ id }) => {
+function closePeer(id) {
   const entry = peers.get(id);
   if (entry) entry.pc.close();
   peers.delete(id);
-});
+}
+
+socket.on('peer-left', ({ id }) => closePeer(id));
+// gracz wrócił po rozłączeniu – zaraz zadzwoni od nowa, więc zamykamy stare połączenie
+socket.on('peer-joined', ({ id }) => closePeer(id));
 
 // przeglądarka może zablokować autoodtwarzanie dźwięku – każde kliknięcie je wznawia
 document.addEventListener('click', () => {
@@ -141,19 +145,78 @@ function saveName(n) {
   try { localStorage.setItem('czolko-name', n); } catch {}
 }
 
+// Sesja zapisana w tej karcie (przetrwa odświeżenie i przywrócenie karty po crashu)
+// oraz w całej przeglądarce (gdy karta została zamknięta).
+const SESSION_KEY = 'czolko-session';
+function saveSession(data) {
+  const json = JSON.stringify(data);
+  try { sessionStorage.setItem(SESSION_KEY, json); } catch {}
+  try { localStorage.setItem(SESSION_KEY, json); } catch {}
+}
+function loadSession(storage) {
+  try { return JSON.parse(storage.getItem(SESSION_KEY)) || null; } catch { return null; }
+}
+function clearSession() {
+  try { sessionStorage.removeItem(SESSION_KEY); } catch {}
+  try { localStorage.removeItem(SESSION_KEY); } catch {}
+}
+
 function onJoined(res) {
   if (!res.ok) {
     $('homeError').textContent = res.error;
     return;
   }
   myId = res.id;
+  saveSession({ code: res.code, token: res.token, name: res.name });
   $('home').classList.add('hidden');
   $('room').classList.remove('hidden');
   $('roomCode').textContent = res.code;
   history.replaceState(null, '', `?pokoj=${res.code}`);
-  // nowy gracz dzwoni do wszystkich obecnych
+  loadNotes(`${res.code}-${res.id}`);
+  // stare połączenia (sprzed rozłączenia) są martwe – dzwonimy do wszystkich od nowa
+  for (const id of [...peers.keys()]) closePeer(id);
   for (const id of res.peers) callPeer(id);
 }
+
+function resume(session, onFail) {
+  socket.emit('resume', { code: session.code, token: session.token }, (res) => {
+    if (res.ok) {
+      $('toast').classList.add('hidden');
+      onJoined(res);
+    } else {
+      clearSession();
+      onFail(res.error);
+    }
+  });
+}
+
+function backToHome(message) {
+  myId = null;
+  state = null;
+  for (const id of [...peers.keys()]) closePeer(id);
+  $('grid').innerHTML = '';
+  $('room').classList.add('hidden');
+  $('home').classList.remove('hidden');
+  $('rejoinBtn').classList.add('hidden');
+  history.replaceState(null, '', location.pathname);
+  $('homeError').textContent = message || '';
+}
+
+$('rejoinBtn').onclick = () => {
+  const session = loadSession(localStorage);
+  if (!session) return $('rejoinBtn').classList.add('hidden');
+  resume(session, (err) => {
+    $('rejoinBtn').classList.add('hidden');
+    $('homeError').textContent = err;
+  });
+};
+
+$('leaveBtn').onclick = () => {
+  if (!confirm('Na pewno wyjść z pokoju? Twoje miejsce w grze przepadnie.')) return;
+  socket.emit('leave-room');
+  clearSession();
+  backToHome();
+};
 
 $('createBtn').onclick = () => {
   const name = $('nameInput').value.trim();
@@ -188,8 +251,19 @@ $('copyLink').onclick = async () => {
 $('micBtn').onclick = () => toggleTrack('audio', $('micBtn'));
 $('camBtn').onclick = () => toggleTrack('video', $('camBtn'));
 
-socket.on('disconnect', () => {
-  if (myId) toast('Utracono połączenie z serwerem. Odśwież stronę.', true);
+socket.on('disconnect', (reason) => {
+  if (!myId) return;
+  if (reason === 'io server disconnect') {
+    // serwer zamknął to połączenie, bo ten sam gracz wrócił w innej karcie/urządzeniu
+    myId = null;
+    toast('Gra została otwarta w innej karcie. Ta karta jest już nieaktywna.', true);
+    return;
+  }
+  toast('Utracono połączenie… próbuję wrócić do gry', true);
+});
+socket.on('connect', () => {
+  const session = loadSession(sessionStorage);
+  if (myId && session) resume(session, (err) => backToHome(err));
 });
 
 // ---------- kafelki graczy ----------
@@ -206,6 +280,7 @@ function ensureTile(player) {
       <video autoplay playsinline></video>
       <div class="no-video">👤<small></small></div>
       <span class="name-chip"></span>
+      <span class="offline-tag hidden">📡 rozłączony – wraca…</span>
       <div class="score-badge hidden"><b></b><small></small></div>
     </div>
     <div class="word-pill"></div>
@@ -276,6 +351,8 @@ function renderTiles() {
     tile.style.setProperty('--c', COLORS[state.players.indexOf(p) % COLORS.length]);
     tile.classList.toggle('turn', isTurn);
     tile.classList.toggle('done', p.guessed && state.phase === 'playing');
+    tile.classList.toggle('offline', !p.connected);
+    tile.querySelector('.offline-tag').classList.toggle('hidden', p.connected);
     tile.querySelector('.ask-tag').classList.toggle('hidden', !isTurn);
     tile.querySelector('.name-chip').textContent =
       (p.id === state.hostId ? '👑 ' : '') + p.name + (isMe ? ' (Ty)' : '');
@@ -331,6 +408,7 @@ function showPanel(name) {
     $(id).classList.toggle('hidden', id !== name);
   }
   $('statusBar').classList.toggle('hidden', state.phase !== 'playing');
+  $('turnBox').classList.toggle('hidden', state.phase !== 'playing');
 }
 
 const isHost = () => state && state.hostId === myId;
@@ -440,7 +518,11 @@ function renderPlay() {
     : me?.guessed
       ? 'Zgadłeś(-aś) swoje hasło! Pomagaj odpowiadać pozostałym.'
       : `Odpowiadaj na głos: tak / nie. Gdy ${nameOf(state.turnId)} zgadnie, kliknij „Zgadł!” pod kamerką. Kolejka przejdzie dalej, gdy pytający zakończy pytanie.`;
-  $('nextBtn').classList.toggle('hidden', !myTurn);
+  $('bigNextBtn').classList.toggle('hidden', !myTurn);
+  $('waitBox').classList.toggle('hidden', myTurn);
+  $('waitText').textContent = me?.guessed
+    ? 'Już zgadłeś(-aś)! 🎉'
+    : `Teraz pyta ${nameOf(state.turnId)}. Twoja kolej jeszcze przyjdzie.`;
   $('skipBtn').classList.toggle('hidden', myTurn || !isHost());
   $('endBtn').classList.toggle('hidden', !isHost());
   renderTimer();
@@ -480,6 +562,8 @@ function renderEnd() {
 }
 
 socket.on('state', (s) => {
+  // nowa gra = nowe hasło, więc stare notatki już się nie przydadzą
+  if (state && state.phase !== 'playing' && s.phase === 'playing') clearNotes();
   state = s;
   clockOffset = s.serverNow - Date.now();
   renderTiles();
@@ -494,7 +578,7 @@ socket.on('guessed', ({ playerId, word }) => {
   toast(playerId === myId ? `🎉 Zgadłeś(-aś)! Twoje hasło: ${word}` : `🎉 ${nameOf(playerId)} zgadł(a): ${word}`);
 });
 
-$('nextBtn').onclick = () => socket.emit('next-turn');
+$('bigNextBtn').onclick = () => socket.emit('next-turn');
 $('skipBtn').onclick = () => {
   if (confirm(`Pominąć turę gracza ${nameOf(state.turnId)}?`)) socket.emit('next-turn');
 };
@@ -552,6 +636,24 @@ function startMusicOnce(e) {
 }
 document.addEventListener('pointerdown', startMusicOnce);
 
+// ---------- notatki ----------
+
+let notesKey = null;
+function loadNotes(key) {
+  notesKey = `czolko-notes-${key}`;
+  try { $('notesText').value = localStorage.getItem(notesKey) || ''; } catch { $('notesText').value = ''; }
+}
+function clearNotes() {
+  $('notesText').value = '';
+  try { if (notesKey) localStorage.removeItem(notesKey); } catch {}
+}
+$('notesText').addEventListener('input', () => {
+  try { if (notesKey) localStorage.setItem(notesKey, $('notesText').value); } catch {}
+});
+$('notesClear').onclick = () => {
+  if (!$('notesText').value || confirm('Wyczyścić notatki?')) clearNotes();
+};
+
 // start: przyciski działają dopiero, gdy kamera i serwery ICE są gotowe
 $('nameInput').value = savedName();
 const codeFromUrl = new URLSearchParams(location.search).get('pokoj');
@@ -559,4 +661,17 @@ if (codeFromUrl) $('codeInput').value = codeFromUrl.toUpperCase();
 Promise.all([initMedia(), loadIceServers()]).then(() => {
   $('createBtn').disabled = false;
   $('joinBtn').disabled = false;
+
+  // ta karta była już w grze (odświeżenie, crash) – wracamy automatycznie
+  const tabSession = loadSession(sessionStorage);
+  if (tabSession && tabSession.code === codeFromUrl?.toUpperCase()) {
+    $('camStatus').textContent = 'Wracam do gry…';
+    return resume(tabSession, (err) => ($('homeError').textContent = err));
+  }
+  // karta była zamknięta – proponujemy powrót przyciskiem
+  const saved = loadSession(localStorage);
+  if (saved) {
+    $('rejoinBtn').textContent = `↩ Wróć do gry (pokój ${saved.code}, jako ${saved.name})`;
+    $('rejoinBtn').classList.remove('hidden');
+  }
 });
