@@ -10,6 +10,46 @@ const MAX_PLAYERS = 8;
 
 const app = express();
 app.use(express.static(path.join(__dirname, 'public')));
+// ---------- serwery STUN/TURN dla WebRTC ----------
+// Bez TURN-a kamerki często nie łączą się między różnymi sieciami (NAT, internet mobilny).
+// Ustaw na hostingu zmienne środowiskowe:
+//  - Cloudflare (darmowe 1000 GB/mies.): CF_TURN_KEY_ID, CF_TURN_API_TOKEN
+//  - albo dowolny TURN: TURN_URLS (po przecinku), TURN_USERNAME, TURN_CREDENTIAL
+const STUN = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] }];
+let iceCache = { servers: null, until: 0 };
+
+async function getIceServers() {
+  if (process.env.TURN_URLS) {
+    return [...STUN, {
+      urls: process.env.TURN_URLS.split(',').map((u) => u.trim()).filter(Boolean),
+      username: process.env.TURN_USERNAME,
+      credential: process.env.TURN_CREDENTIAL
+    }];
+  }
+  const { CF_TURN_KEY_ID: keyId, CF_TURN_API_TOKEN: token } = process.env;
+  if (!keyId || !token) return STUN;
+  if (iceCache.servers && Date.now() < iceCache.until) return iceCache.servers;
+  try {
+    const res = await fetch(`https://rtc.live.cloudflare.com/v1/turn/keys/${keyId}/credentials/generate`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ttl: 86400 })
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const turn = Array.isArray(data.iceServers) ? data.iceServers : [data.iceServers];
+    iceCache = { servers: [...STUN, ...turn], until: Date.now() + 12 * 3600 * 1000 };
+    return iceCache.servers;
+  } catch (err) {
+    console.error('Nie udało się pobrać danych TURN z Cloudflare:', err.message);
+    return STUN;
+  }
+}
+
+app.get('/ice', async (req, res) => {
+  res.json({ iceServers: await getIceServers() });
+});
+
 const server = http.createServer(app);
 const io = new Server(server);
 
@@ -54,6 +94,7 @@ function createRoom(hostId) {
     },
     order: [],
     turnIndex: 0,
+    turnNumber: 0,
     turnEndsAt: null,
     timer: null,
     usedWords: new Set(),
@@ -126,6 +167,7 @@ function beginTurn(room) {
   const id = currentTurnId(room);
   const p = id && room.players.get(id);
   if (p) p.turns++;
+  room.turnNumber++;
   if (room.settings.turnTime > 0) {
     room.turnEndsAt = Date.now() + room.settings.turnTime * 1000;
     room.timer = setTimeout(() => {
@@ -161,6 +203,7 @@ function startPlaying(room) {
     p.word = drawWord(room, p) ?? '(brak hasła)';
   }
   room.turnIndex = 0;
+  room.turnNumber = 0;
   room.phase = 'playing';
   beginTurn(room);
 }
@@ -186,6 +229,7 @@ function viewFor(room, viewerId) {
     categories: Object.keys(CATEGORIES),
     wordsPerPlayer: WORDS_PER_PLAYER,
     turnId: currentTurnId(room),
+    turnNumber: room.turnNumber,
     turnEndsAt: room.turnEndsAt,
     serverNow: Date.now(),
     order: room.order,

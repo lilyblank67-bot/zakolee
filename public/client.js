@@ -1,18 +1,17 @@
-// Jeśli łączenie kamer nie działa w niektórych sieciach, dopisz tu serwer TURN:
-// { urls: 'turn:adres:3478', username: '...', credential: '...' }
-const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
-
 const socket = io();
 const $ = (id) => document.getElementById(id);
+
+const COLORS = ['#3fd0ff', '#ffe14d', '#ff5c8a', '#7cf06b', '#ff9a3c', '#b98bff', '#4dffd2', '#ff7bf2'];
 
 let myId = null;
 let state = null;
 let localStream = null;
-const peers = new Map(); // id -> { pc, stream }
+let iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
+const peers = new Map(); // id -> { pc, stream, pending, chain, status, caller }
 let timerInterval = null;
 let clockOffset = 0;
 
-// ---------- kamera ----------
+// ---------- kamera i serwery ICE ----------
 
 async function initMedia() {
   try {
@@ -26,11 +25,18 @@ async function initMedia() {
     console.warn(err);
     localStream = null;
     $('camStatus').textContent = window.isSecureContext
-      ? 'Brak dostępu do kamery/mikrofonu – możesz grać, ale inni Cię nie zobaczą.'
+      ? 'Brak dostępu do kamery/mikrofonu. Możesz grać, ale inni Cię nie zobaczą.'
       : 'Kamera wymaga HTTPS (lub localhost). Zobacz README.';
-  } finally {
-    $('createBtn').disabled = false;
-    $('joinBtn').disabled = false;
+  }
+}
+
+async function loadIceServers() {
+  try {
+    const res = await fetch('/ice');
+    const data = await res.json();
+    if (Array.isArray(data.iceServers) && data.iceServers.length) iceServers = data.iceServers;
+  } catch (err) {
+    console.warn('Nie udało się pobrać serwerów ICE', err);
   }
 }
 
@@ -43,9 +49,9 @@ function toggleTrack(kind, btn) {
 
 // ---------- WebRTC ----------
 
-function createPeer(id) {
-  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-  const entry = { pc, stream: new MediaStream() };
+function createPeer(id, caller) {
+  const pc = new RTCPeerConnection({ iceServers });
+  const entry = { pc, stream: null, pending: [], chain: Promise.resolve(), status: 'connecting', caller, restarted: false };
   peers.set(id, entry);
 
   if (localStream) {
@@ -59,46 +65,71 @@ function createPeer(id) {
     if (e.candidate) socket.emit('signal', { to: id, data: { candidate: e.candidate } });
   };
   pc.ontrack = (e) => {
-    entry.stream = e.streams[0] || entry.stream;
-    if (!e.streams[0]) entry.stream.addTrack(e.track);
+    if (e.streams[0]) {
+      entry.stream = e.streams[0];
+    } else {
+      entry.stream ??= new MediaStream();
+      entry.stream.addTrack(e.track);
+    }
     attachStream(id);
   };
   pc.onconnectionstatechange = () => {
-    if (pc.connectionState === 'failed') pc.restartIce?.();
+    entry.status = pc.connectionState;
+    if (pc.connectionState === 'failed' && entry.caller && !entry.restarted) {
+      // jedna próba ponownego zestawienia połączenia
+      entry.restarted = true;
+      entry.status = 'connecting';
+      sendOffer(id, entry, true);
+    }
+    updateVideoState(id);
   };
   return entry;
 }
 
-async function callPeer(id) {
-  const { pc } = createPeer(id);
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
+async function sendOffer(id, entry, iceRestart = false) {
+  const { pc } = entry;
+  await pc.setLocalDescription(await pc.createOffer({ iceRestart }));
   socket.emit('signal', { to: id, data: { sdp: pc.localDescription } });
 }
 
-socket.on('signal', async ({ from, data }) => {
-  let entry = peers.get(from);
-  if (!entry) entry = createPeer(from);
+function callPeer(id) {
+  const entry = createPeer(id, true);
+  entry.chain = entry.chain.then(() => sendOffer(id, entry)).catch((e) => console.warn(e));
+}
+
+async function handleSignal(from, entry, data) {
   const { pc } = entry;
-  try {
-    if (data.sdp) {
-      await pc.setRemoteDescription(data.sdp);
-      if (data.sdp.type === 'offer') {
-        await pc.setLocalDescription(await pc.createAnswer());
-        socket.emit('signal', { to: from, data: { sdp: pc.localDescription } });
-      }
-    } else if (data.candidate) {
-      await pc.addIceCandidate(data.candidate);
+  if (data.sdp) {
+    await pc.setRemoteDescription(data.sdp);
+    // kandydaci, którzy przyszli przed opisem sesji
+    for (const c of entry.pending.splice(0)) await pc.addIceCandidate(c).catch((e) => console.warn(e));
+    if (data.sdp.type === 'offer') {
+      await pc.setLocalDescription(await pc.createAnswer());
+      socket.emit('signal', { to: from, data: { sdp: pc.localDescription } });
     }
-  } catch (err) {
-    console.warn('Błąd sygnalizacji', err);
+  } else if (data.candidate) {
+    if (!pc.remoteDescription) entry.pending.push(data.candidate);
+    else await pc.addIceCandidate(data.candidate);
   }
+}
+
+socket.on('signal', ({ from, data }) => {
+  const entry = peers.get(from) || createPeer(from, false);
+  // sygnały od jednej osoby przetwarzamy po kolei
+  entry.chain = entry.chain
+    .then(() => handleSignal(from, entry, data))
+    .catch((err) => console.warn('Błąd sygnalizacji', err));
 });
 
 socket.on('peer-left', ({ id }) => {
   const entry = peers.get(id);
   if (entry) entry.pc.close();
   peers.delete(id);
+});
+
+// przeglądarka może zablokować autoodtwarzanie dźwięku – każde kliknięcie je wznawia
+document.addEventListener('click', () => {
+  document.querySelectorAll('.frame video').forEach((v) => v.paused && v.srcObject && v.play().catch(() => {}));
 });
 
 // ---------- dołączanie ----------
@@ -149,7 +180,7 @@ $('copyLink').onclick = async () => {
   const link = `${location.origin}${location.pathname}?pokoj=${state?.code ?? ''}`;
   try {
     await navigator.clipboard.writeText(link);
-    toast('Link skopiowany!');
+    toast('🔗 Link skopiowany!');
   } catch {
     prompt('Skopiuj link:', link);
   }
@@ -161,7 +192,7 @@ socket.on('disconnect', () => {
   if (myId) toast('Utracono połączenie z serwerem. Odśwież stronę.', true);
 });
 
-// ---------- kafelki wideo ----------
+// ---------- kafelki graczy ----------
 
 function ensureTile(player) {
   let tile = document.getElementById(`tile-${player.id}`);
@@ -170,13 +201,14 @@ function ensureTile(player) {
   tile.id = `tile-${player.id}`;
   tile.className = 'tile';
   tile.innerHTML = `
-    <div class="video-wrap">
+    <div class="ask-tag hidden">🎤 Pyta</div>
+    <div class="frame">
       <video autoplay playsinline></video>
-      <div class="no-video">👤</div>
-      <span class="name-tag"></span>
-      <span class="turn-tag hidden">Pyta teraz</span>
+      <div class="no-video">👤<small></small></div>
+      <span class="name-chip"></span>
+      <div class="score-badge hidden"><b></b><small></small></div>
     </div>
-    <div class="word-label"></div>
+    <div class="word-pill"></div>
     <div class="tile-actions"></div>`;
   if (player.id === myId) {
     tile.classList.add('me');
@@ -196,7 +228,28 @@ function attachStream(id) {
     video.srcObject = stream;
     video.play().catch(() => {});
   }
-  tile.querySelector('.no-video').classList.toggle('hidden', !!stream);
+  updateVideoState(id);
+}
+
+function updateVideoState(id) {
+  const tile = document.getElementById(`tile-${id}`);
+  if (!tile) return;
+  const overlay = tile.querySelector('.no-video');
+  const note = overlay.querySelector('small');
+  if (id === myId) {
+    overlay.classList.toggle('hidden', !!localStream);
+    note.textContent = localStream ? '' : 'Brak kamery';
+    return;
+  }
+  const entry = peers.get(id);
+  const hasVideo = entry?.stream?.getVideoTracks().length;
+  const connected = entry?.status === 'connected';
+  overlay.classList.toggle('hidden', !!(hasVideo && connected));
+  if (!entry || entry.status === 'connecting' || entry.status === 'new') note.textContent = 'Łączenie z kamerą…';
+  else if (entry.status === 'failed') note.textContent = 'Nie udało się połączyć kamery (sieć blokuje, potrzebny TURN)';
+  else if (entry.status === 'disconnected') note.textContent = 'Połączenie przerwane…';
+  else if (!hasVideo) note.textContent = 'Gracz bez kamery';
+  else note.textContent = '';
 }
 
 function renderTiles() {
@@ -209,6 +262,8 @@ function renderTiles() {
   const ordered = state.order.length
     ? [...state.order, ...state.players.map((p) => p.id).filter((id) => !state.order.includes(id))]
     : state.players.map((p) => p.id);
+  const inGame = state.phase === 'playing' || state.phase === 'ended';
+  const newWord = state.settings.afterGuess === 'newWord';
 
   for (const id of ordered) {
     const p = state.players.find((x) => x.id === id);
@@ -218,33 +273,45 @@ function renderTiles() {
 
     const isMe = p.id === myId;
     const isTurn = state.turnId === p.id;
+    tile.style.setProperty('--c', COLORS[state.players.indexOf(p) % COLORS.length]);
     tile.classList.toggle('turn', isTurn);
     tile.classList.toggle('done', p.guessed && state.phase === 'playing');
-    tile.querySelector('.turn-tag').classList.toggle('hidden', !isTurn);
-    tile.querySelector('.name-tag').textContent =
-      (isMe ? `${p.name} (Ty)` : p.name) + (p.id === state.hostId ? ' 👑' : '');
+    tile.querySelector('.ask-tag').classList.toggle('hidden', !isTurn);
+    tile.querySelector('.name-chip').textContent =
+      (p.id === state.hostId ? '👑 ' : '') + p.name + (isMe ? ' (Ty)' : '');
 
-    const label = tile.querySelector('.word-label');
-    label.className = 'word-label';
+    const badge = tile.querySelector('.score-badge');
+    badge.classList.toggle('hidden', !inGame);
+    if (!newWord && p.guessed) {
+      badge.querySelector('b').textContent = `${p.finishPlace}.`;
+      badge.querySelector('small').textContent = 'miejsce';
+    } else {
+      badge.querySelector('b').textContent = p.score;
+      badge.querySelector('small').textContent = 'pkt';
+    }
+
+    const pill = tile.querySelector('.word-pill');
+    pill.className = 'word-pill';
     if (state.phase === 'lobby' || state.phase === 'collect') {
-      label.classList.add('empty');
-      label.textContent = state.phase === 'collect'
+      pill.classList.add('empty');
+      pill.textContent = state.phase === 'collect'
         ? (p.submitted ? 'Hasła wpisane ✅' : 'Wpisuje hasła…')
         : 'Czeka na start';
     } else if (p.word == null) {
-      label.classList.add('secret');
-      label.textContent = '???';
+      pill.classList.add('secret');
+      pill.textContent = '???';
     } else if (p.guessed) {
-      label.classList.add('solved');
-      label.textContent = `✔ ${p.word}`;
+      pill.classList.add('solved');
+      pill.textContent = `✔ ${p.word}`;
     } else {
-      label.textContent = p.word;
+      pill.textContent = p.word;
     }
 
     const actions = tile.querySelector('.tile-actions');
     actions.innerHTML = '';
     if (state.phase === 'playing' && !isMe && !p.guessed) {
       const btn = document.createElement('button');
+      btn.className = 'btn secondary';
       btn.textContent = '✔ Zgadł!';
       btn.onclick = () => {
         if (confirm(`${p.name} zgadł(a) hasło „${p.word}”?`)) {
@@ -259,13 +326,20 @@ function renderTiles() {
 // ---------- panel ----------
 
 function showPanel(name) {
-  for (const id of ['lobbyPanel', 'collectPanel', 'playPanel', 'endPanel']) {
+  $('panel').classList.toggle('hidden', !name);
+  for (const id of ['lobbyPanel', 'collectPanel', 'endPanel']) {
     $(id).classList.toggle('hidden', id !== name);
   }
+  $('statusBar').classList.toggle('hidden', state.phase !== 'playing');
 }
 
 const isHost = () => state && state.hostId === myId;
 const nameOf = (id) => state.players.find((p) => p.id === id)?.name ?? '?';
+
+function renderRoundPill() {
+  const labels = { lobby: 'lobby', collect: 'wpisywanie haseł', ended: 'koniec gry' };
+  $('roundPill').textContent = state.phase === 'playing' ? `tura ${state.turnNumber}` : labels[state.phase];
+}
 
 function renderLobby() {
   showPanel('lobbyPanel');
@@ -283,20 +357,20 @@ function renderLobby() {
     if (!list.children.length) {
       for (const c of state.categories) {
         const label = document.createElement('label');
-        label.innerHTML = `<input type="checkbox" value="${c}"> ${c}`;
+        label.innerHTML = `<input type="checkbox" value="${esc(c)}"><span>${esc(c)}</span>`;
         list.appendChild(label);
       }
     }
     list.querySelectorAll('input').forEach((cb) => (cb.checked = s.categories.includes(cb.value)));
     $('startBtn').disabled = state.players.length < 2;
-    $('startBtn').textContent = state.players.length < 2 ? 'Czekam na graczy…' : 'Start gry';
+    $('startBtn').textContent = state.players.length < 2 ? 'Czekam na graczy…' : '▶ Start gry';
   } else {
     $('guestSettings').innerHTML = `
       <p><b>Tryb:</b> ${s.mode === 'custom' ? 'własne hasła' : 'losowe z kategorii'}</p>
-      ${s.mode === 'categories' ? `<p><b>Kategorie:</b> ${s.categories.join(', ')}</p>` : ''}
+      ${s.mode === 'categories' ? `<p><b>Kategorie:</b> ${s.categories.map(esc).join(', ')}</p>` : ''}
       <p><b>Po zgadnięciu:</b> ${s.afterGuess === 'finish' ? 'koniec gry dla gracza' : 'nowe hasło'}</p>
       <p><b>Czas tury:</b> ${s.turnTime ? s.turnTime + ' s' : 'bez limitu'}</p>
-      <p class="muted small">Czekamy, aż host ${nameOf(state.hostId)} rozpocznie grę…</p>`;
+      <p class="muted small">Czekamy, aż host ${esc(nameOf(state.hostId))} rozpocznie grę…</p>`;
   }
 }
 
@@ -355,31 +429,18 @@ $('wordsForm').onsubmit = (e) => {
 };
 
 function renderPlay() {
-  showPanel('playPanel');
+  showPanel(null);
   const myTurn = state.turnId === myId;
   const me = state.players.find((p) => p.id === myId);
   $('turnTitle').textContent = myTurn ? '🎤 Twoja kolej!' : `Pyta: ${nameOf(state.turnId)}`;
   $('turnHint').textContent = myTurn
-    ? 'Zadawaj pytania na tak/nie. Inni odpowiadają na głos. Gdy zgadniesz – ktoś kliknie „Zgadł!” pod Twoją kamerką.'
+    ? 'Zadawaj pytania na tak/nie. Gdy zgadniesz, ktoś kliknie „Zgadł!” pod Twoją kamerką.'
     : me?.guessed
       ? 'Zgadłeś(-aś) swoje hasło! Pomagaj odpowiadać pozostałym.'
-      : 'Odpowiadaj na głos „tak” / „nie”. Gdy gracz zgadnie, kliknij „Zgadł!” pod jego kamerką.';
+      : 'Odpowiadaj na głos: tak / nie. Gdy gracz zgadnie, kliknij „Zgadł!” pod jego kamerką.';
   $('nextBtn').classList.toggle('hidden', !(myTurn || isHost()));
-  $('nextBtn').textContent = myTurn ? 'Pasuję – następny gracz ➜' : 'Następny gracz ➜';
+  $('nextBtn').textContent = myTurn ? 'Pasuję ➜' : 'Następny ➜';
   $('endBtn').classList.toggle('hidden', !isHost());
-
-  const newWord = state.settings.afterGuess === 'newWord';
-  const sorted = [...state.players].sort((a, b) =>
-    newWord ? b.score - a.score : (a.finishPlace ?? 99) - (b.finishPlace ?? 99));
-  $('scoreList').innerHTML = sorted
-    .map((p) => {
-      const result = newWord
-        ? `${p.score} pkt`
-        : p.guessed ? `🏅 ${p.finishPlace}. miejsce` : 'zgaduje…';
-      return `<div class="status-row"><span>${esc(p.name)}</span><span class="meta">${result} · tur: ${p.turns}</span></div>`;
-    })
-    .join('');
-
   renderTimer();
 }
 
@@ -403,12 +464,13 @@ function renderEnd() {
   const newWord = state.settings.afterGuess === 'newWord';
   const sorted = [...state.players].sort((a, b) =>
     newWord ? b.score - a.score : (a.finishPlace ?? 99) - (b.finishPlace ?? 99));
+  const medals = ['🥇', '🥈', '🥉'];
   $('ranking').innerHTML = sorted
-    .map((p) => {
+    .map((p, i) => {
       const result = newWord ? `${p.score} pkt` : p.guessed ? 'zgadł(a)' : 'nie zgadł(a)';
       const words = [...p.history];
       if (!p.guessed || newWord) words.push(`${p.word} (niezgadnięte)`);
-      return `<li><b>${esc(p.name)}</b> – ${result}, tur: ${p.turns}<div class="words">${words.map(esc).join(', ')}</div></li>`;
+      return `<li>${medals[i] ?? `${i + 1}.`} <b>${esc(p.name)}</b> – ${result}, tur: ${p.turns}<div class="words">${words.map(esc).join(', ')}</div></li>`;
     })
     .join('');
   $('endHostBtns').classList.toggle('hidden', !isHost());
@@ -419,6 +481,7 @@ socket.on('state', (s) => {
   state = s;
   clockOffset = s.serverNow - Date.now();
   renderTiles();
+  renderRoundPill();
   if (s.phase === 'lobby') renderLobby();
   else if (s.phase === 'collect') renderCollect();
   else if (s.phase === 'playing') renderPlay();
@@ -444,13 +507,17 @@ let toastTimeout = null;
 function toast(msg, sticky = false) {
   const el = $('toast');
   el.textContent = msg;
+  el.classList.toggle('warn', sticky);
   el.classList.remove('hidden');
   clearTimeout(toastTimeout);
   if (!sticky) toastTimeout = setTimeout(() => el.classList.add('hidden'), 3500);
 }
 
-// start
+// start: przyciski działają dopiero, gdy kamera i serwery ICE są gotowe
 $('nameInput').value = savedName();
 const codeFromUrl = new URLSearchParams(location.search).get('pokoj');
 if (codeFromUrl) $('codeInput').value = codeFromUrl.toUpperCase();
-initMedia();
+Promise.all([initMedia(), loadIceServers()]).then(() => {
+  $('createBtn').disabled = false;
+  $('joinBtn').disabled = false;
+});
